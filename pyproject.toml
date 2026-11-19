@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logel-log-capture"
+version = "1.0.0"
+description = "Headless (no-GUI) Unisoc/SPRD Logel log capture CLI for Windows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/zhengqingquan/logel-log-capture"
+Source = "https://github.com/zhengqingquan/logel-log-capture"
+
+[project.scripts]
+lcapt = "lcapt.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["lcapt"]
