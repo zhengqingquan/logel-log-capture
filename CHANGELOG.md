@@ -6,6 +6,8 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-19
+
 ### 新增
 
 - **`doctor` / `capture` 启动前检测其它 `Logel.exe`**：若已有 GUI 或残留进程，给出软警告
@@ -37,7 +39,7 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 - `--out` 帮助文案与默认一致：`<Logel>\..\Logel_History`，并注明须纯 ASCII。
 - `abort()` 失败兜底改为先 `WM_CLOSE` 再短等，最后才 `kill`。
 - `lcapt stop` 清锁改为等窗口消失，或 launcher 与 Logel **均**退出（避免 launcher 先死误清锁）。
-- 移除 `provision --max-size-mb`：不再把未证实单位的 `MaxSize` 写入 ini；分段用 `-d` / `--max-bytes`。
+- **移除 `provision --max-size-mb`**：不再把未证实单位的 `MaxSize` 写入 ini；分段用 `-d` / `--max-bytes`。
 
 ## [1.0.0] - 2026-11-19
 
