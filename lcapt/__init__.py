@@ -3,6 +3,6 @@
 对外只暴露 :func:`lcapt.cli.main`。
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = ["__version__"]

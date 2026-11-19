@@ -77,10 +77,11 @@ lcapt watch --logel "<Logel>"          # 默认每轮抓到掉线；Ctrl+C 结�
 |------|------|
 | `doctor` | 环境自检（含其它 Logel 软检查）；硬性检查不过返回 2 |
 | `provision [--link] [--force]` | 建/刷新 profile。`--link` 用硬链接镜像（配置类文件仍复制） |
-| `capture [-d SEC] [--export] [--no-playback] [--ue-base T] [--min-bytes N] [--max-bytes N]` | 抓取。`-d 0` / 负数 = 抓到 Ctrl+C/`stop`；`--max-bytes` 达上限提前收尾 |
-| `watch [-d SEC] [--settle SEC] [--poll SEC] [--once] [--max-failures N]` | 等到 **SPRD DIAG** 出现后自动 `capture`；掉线释放后再等。口仍在但连续失败时指数退避，达上限退出。适合烧写后开机抓 log |
+| `capture [-d SEC] [--export] [--live-export] [--live-interval SEC] [--no-playback] [--ue-base T] [--min-bytes N] [--max-bytes N]` | 抓取。`-d 0` / 负数 = 抓到 Ctrl+C/`stop`；`--max-bytes` 达上限提前收尾；`--live-export` 抓取中周期性追加 `session/live.txt` |
+| `watch [-d SEC] [--live-export] [--settle SEC] [--poll SEC] [--once] [--max-failures N]` | 等到 **SPRD DIAG** 出现后自动 `capture`；掉线释放后再等。口仍在但连续失败时指数退避，达上限退出。适合烧写后开机抓 log |
 | `stop` | 按窗口类名找隐藏窗口发 `WM_CLOSE` |
-| `list [--limit N]` | 会话列表（大小 / 是否完整收尾 / 是否有解码缓存） |
+| `list [--limit N]` | 会话列表（大小 / 是否完整收尾 / 是否有解码缓存 / 是否有 live.txt） |
+| `follow [SESSION] [--once] [--interval SEC] [-o FILE]` | 刷新 `live.txt`（抓取中 raw `.logel`，有缓存则用 traceview；不占 DIAG） |
 | `export [SESSION] [-o FILE] [--ue-base T] [--no-playback]` | 调 logel2txt 导出；省略 SESSION 取最新 |
 | `version` | 版本 |
 
@@ -96,6 +97,22 @@ lcapt watch --logel "<Logel>"          # 默认每轮抓到掉线；Ctrl+C 结�
 **硬约束：`--out` / `LCAPT_OUT` 必须是纯 ASCII 路径**（禁止中文等非 ASCII 字符）。指向含中文目录时，DIAG 可能连上但会话建失败 / 超时无 `.logel`。应先写到 ASCII 目录，再把产物拷到中文工作区。
 
 导出默认走 **playback**（Logel 重新解析 `.logel`，补全停止瞬间的最后几秒）；`--no-playback` 直接读抓取缓存（快，但少最后几秒）。`--playback` 保留为兼容别名。
+
+**边抓边看（Agent）**：`--live-export` / `follow` 周期性追加 `<session>/live.txt`，供轮询。
+
+| 阶段 | 数据来源 | 说明 |
+|------|----------|------|
+| 抓取中 | 增长中的 `.logel` **明文抽取** | Logel R9.23 等版本抓取中不刷 `traceview.dat`（常为 0 字节），故 live 走 raw；行数偏少、无完整 TRACE 解码 |
+| 停抓后 | plain `traceview`（若已刷出） | 自动用解码缓存**覆盖** live.txt，比 raw 更全；`Module` 仍可能为空 |
+| 完整导出 | `--export`（默认 playback） | 过程件 ≠ 最终 Export Trace；要对齐请停后再 export |
+
+需可用的 `logel2txt`（建议 ≥0.2.0）。示例：
+
+```powershell
+lcapt capture -d 0 --live-export --logel "<Logel>" --logel2txt "<logel2txt.exe>"
+lcapt list --limit 1 --json   # 看 live_txt 路径后轮询该文件
+lcapt follow --once           # 或另开进程只刷 live.txt
+```
 
 环境变量：`LCAPT_PROFILE`、`LCAPT_OUT`、`LCAPT_WINDOW_CLASS`、`LOGEL2TXT`、`LOGEL_HOME` / `LOGEL_EXE` / `LOGEL_ROOT`。
 

@@ -6,6 +6,21 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-19
+
+### 新增
+
+- **`--live-export` / `--live-interval`**（`capture` / `watch`）：抓取中周期性追加
+  `<session>/live.txt`，供 Agent/脚本轮询。
+- **`lcapt follow [SESSION]`**：只刷 live.txt（`--once` / `--interval`）；不占 DIAG。
+- **`list --json`** 会话摘要增加 `live_txt` 字段。
+
+### 说明
+
+- **抓取中** Logel 往往不刷 `traceview.dat`：live 对增长中 `.logel` 做明文抽取（不完整）。
+- **停抓后** 若 plain `traceview` 已写出，则用解码结果覆盖 `live.txt`；`--export` 仍默认 playback。
+- 依赖 logel2txt ≥0.2.0（增量 API / `follow`）。
+
 ## [2.0.0] - 2026-11-19
 
 ### 新增

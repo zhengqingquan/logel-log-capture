@@ -26,6 +26,8 @@ from .export import (
     find_logel2txt,
     find_sprd_diag_ports,
     list_com_ports,
+    live_export_once,
+    live_txt_path,
     wait_for_sprd_diag,
 )
 from .logel import LogelLayoutError, find_install, list_sessions, read_ini, ini_get
@@ -201,12 +203,19 @@ def _run_one_capture(args, log: Logger, paths: CapturePaths, profile_dir: Path) 
         log(f"[capture][WARN] {warn}")
     cap = HeadlessCapture(paths, log=log)
     started = time.time()
+    live_export = bool(getattr(args, "live_export", False))
+    live_interval = float(getattr(args, "live_interval", 2.0) or 2.0)
+    logel2txt_path = Path(args.logel2txt) if getattr(args, "logel2txt", None) else None
     try:
         result = cap.run(
             capture_seconds(args.duration),
             min_bytes=args.min_bytes,
             max_bytes=args.max_bytes,
             stop_timeout=args.stop_timeout,
+            live_export=live_export,
+            live_interval=live_interval,
+            logel2txt=logel2txt_path,
+            ue_base=getattr(args, "ue_base", None),
         )
     except CaptureError as exc:
         print(f"[lcapt] capture failed: {exc}", file=sys.stderr)
@@ -218,6 +227,19 @@ def _run_one_capture(args, log: Logger, paths: CapturePaths, profile_dir: Path) 
 
     data = result.to_dict()
     data["elapsed_sec"] = round(time.time() - started, 1)
+
+    if live_export:
+        # 停抓后再刷一轮，尽量收下缓存里已完整的尾部记录
+        live = live_export_once(
+            result.session.dir,
+            logel2txt=logel2txt_path,
+            ue_base=getattr(args, "ue_base", None),
+            log=log,
+        )
+        live_path = live_txt_path(result.session.dir)
+        data["live_txt"] = str(live_path) if live_path.is_file() else None
+        if live is not None:
+            data["live_export"] = live.to_dict()
 
     if getattr(args, "export", False):
         try:
@@ -236,6 +258,8 @@ def _run_one_capture(args, log: Logger, paths: CapturePaths, profile_dir: Path) 
             return EXIT_EXPORT
 
     human = _human_capture(result)
+    if data.get("live_txt"):
+        human.append(f"live   : {data['live_txt']}")
     if "export" in data:
         human.append(f"text   : {data['export']['output']} ({data['export']['lines']} lines)")
     _emit(data, args.json, human)
@@ -352,15 +376,64 @@ def cmd_list(args, log: Logger) -> int:
     rows = [s.summary() for s in sessions]
     human = [f"output dir: {out_dir}", ""]
     for row in rows:
+        live = "live" if row.get("live_txt") else "no live"
         human.append(
             f"{Path(row['session']).name:<40} {row['size_bytes']/1024:>9.0f} KB  "
             f"{'complete' if row['has_stop_marker'] else 'no stop marker'}  "
-            f"{'cached' if row['traceview_cached'] else 'no cache'}"
+            f"{'cached' if row['traceview_cached'] else 'no cache'}  "
+            f"{live}"
         )
     if not rows:
         human.append("(empty)")
     _emit({"out_dir": str(out_dir), "sessions": rows}, args.json, human)
     return EXIT_OK
+
+
+def cmd_follow(args, log: Logger) -> int:
+    """对已有/正在抓的会话周期性追加 live.txt（不占 DIAG，只读 traceview 缓存）。"""
+    _, out_dir = _paths(args)
+    target = Path(args.session) if args.session else _latest_session(out_dir)
+    if target is None:
+        print(f"[lcapt] no sessions to follow in {out_dir}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    target = target.expanduser().resolve()
+    out = Path(args.output) if args.output else live_txt_path(target)
+    interval = max(0.5, float(args.interval))
+    logel2txt_path = Path(args.logel2txt) if args.logel2txt else None
+    log(f"[follow] session={target} -> {out} (interval={interval}s)")
+    if args.once:
+        result = live_export_once(
+            target,
+            output=out,
+            ue_base=args.ue_base,
+            logel2txt=logel2txt_path,
+            log=log,
+        )
+        data = {
+            "session": str(target),
+            "live_txt": str(out) if out.is_file() else None,
+            "live_export": result.to_dict() if result else None,
+        }
+        human = [f"session: {target}", f"live   : {out}"]
+        if result:
+            human.append(f"added  : {result.added} (next_index={result.next_index})")
+        _emit(data, args.json, human)
+        return EXIT_OK
+    try:
+        while True:
+            live_export_once(
+                target,
+                output=out,
+                ue_base=args.ue_base,
+                logel2txt=logel2txt_path,
+                log=log,
+            )
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        log("[follow] stopped")
+        data = {"session": str(target), "live_txt": str(out) if out.is_file() else None}
+        _emit(data, args.json, [f"session: {target}", f"live   : {out}"])
+        return EXIT_OK
 
 
 def cmd_export(args, log: Logger) -> int:
@@ -588,6 +661,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--playback", dest="playback", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--logel2txt", default=None)
+    p.add_argument(
+        "--live-export",
+        action="store_true",
+        help="While capturing, append session/live.txt (raw .logel plaintext while "
+        "traceview is empty; after stop, rewrite from plain cache if available). "
+        "Final --export still uses playback",
+    )
+    p.add_argument(
+        "--live-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between live.txt refresh passes when --live-export is set (default: 2)",
+    )
     p.set_defaults(func=cmd_capture, playback=True)
 
     p = new(
@@ -612,6 +698,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-playback", dest="playback", action="store_false")
     p.add_argument("--playback", dest="playback", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--logel2txt", default=None)
+    p.add_argument(
+        "--live-export",
+        action="store_true",
+        help="While capturing each round, append session/live.txt via logel2txt follow",
+    )
+    p.add_argument(
+        "--live-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between live.txt refresh passes when --live-export is set (default: 2)",
+    )
     p.add_argument(
         "--poll",
         type=float,
@@ -649,6 +746,27 @@ def build_parser() -> argparse.ArgumentParser:
     p = new("list", "List capture sessions")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(func=cmd_list)
+
+    p = new(
+        "follow",
+        "Append/refresh session/live.txt (raw .logel while capturing; traceview after flush)",
+    )
+    p.add_argument("session", nargs="?", help="Session dir; defaults to the latest")
+    p.add_argument("-o", "--output", default=None, help="live txt path (default: <session>/live.txt)")
+    p.add_argument("--ue-base", default=None, help="UE base time HH:MM:SS.mmm")
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Poll seconds between incremental passes (default: 2)",
+    )
+    p.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one incremental pass then exit",
+    )
+    p.add_argument("--logel2txt", default=None)
+    p.set_defaults(func=cmd_follow)
 
     p = new("export", "Export a session to txt (via logel2txt)")
     p.add_argument("session", nargs="?", help="Session dir; defaults to the latest")

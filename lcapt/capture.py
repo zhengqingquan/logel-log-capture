@@ -377,6 +377,10 @@ class HeadlessCapture:
         progress_every: float = 5.0,
         diag_port: Optional[int] = None,
         lost_debounce_sec: float = DIAG_LOST_DEBOUNCE_SEC,
+        live_export: bool = False,
+        live_interval: float = 2.0,
+        logel2txt: Optional[Path] = None,
+        ue_base: Optional[str] = None,
     ) -> Tuple[bool, Optional[str]]:
         """抓取主循环。duration_sec=None 表示抓到 Ctrl+C / 进程结束 / 外部 `lcapt stop`。
 
@@ -386,10 +390,14 @@ class HeadlessCapture:
         - lost_reason：非空表示因 DIAG 丢失而停。
         """
         assert self.proc is not None
+        from .export import live_export_once
+
         started = time.time()
         last_report = 0.0
+        last_live = 0.0
         lost_since: Optional[float] = None
         port = int(diag_port) if diag_port else 0
+        live_every = max(0.5, float(live_interval)) if live_export else 0.0
         while True:
             if self.proc.poll() is not None:
                 return False, None
@@ -414,6 +422,19 @@ class HeadlessCapture:
                 self._log(
                     f"[capture] {int(elapsed)}s captured, .logel {size/1024:.0f} KB ({name})"
                 )
+            if live_every and (now - last_live) >= live_every:
+                last_live = now
+                sess = self._session()
+                if sess is not None and sess.traceview_dir is not None:
+                    try:
+                        live_export_once(
+                            sess.dir,
+                            logel2txt=logel2txt,
+                            ue_base=ue_base,
+                            log=self._log,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — 不中断抓取
+                        self._log(f"[live][WARN] {exc}")
             if max_bytes and size >= max_bytes:
                 self._log(f"[capture] reached --max-bytes ({max_bytes}), finishing early")
                 return True, None
@@ -424,6 +445,8 @@ class HeadlessCapture:
                 sleep_for = min(self._poll, max(0.05, duration_sec - elapsed))
             if lost_since is not None:
                 sleep_for = min(sleep_for, max(0.05, lost_debounce_sec - (now - lost_since)))
+            if live_every:
+                sleep_for = min(sleep_for, max(0.05, live_every - (now - last_live)))
             time.sleep(sleep_for)
 
     def _retarget_session_from_log(self, chunk: str) -> None:
@@ -536,6 +559,10 @@ class HeadlessCapture:
         min_bytes: int = 0,
         max_bytes: Optional[int] = None,
         stop_timeout: float = 120.0,
+        live_export: bool = False,
+        live_interval: float = 2.0,
+        logel2txt: Optional[Path] = None,
+        ue_base: Optional[str] = None,
     ) -> CaptureResult:
         warnings: List[str] = []
         started = time.time()
@@ -557,6 +584,10 @@ class HeadlessCapture:
                     duration_sec,
                     max_bytes=max_bytes,
                     diag_port=int(diag) if isinstance(diag, int) else None,
+                    live_export=live_export,
+                    live_interval=live_interval,
+                    logel2txt=logel2txt,
+                    ue_base=ue_base,
                 )
             except KeyboardInterrupt:
                 interrupted = True

@@ -368,12 +368,14 @@ class Session:
 
     def summary(self) -> Dict[str, object]:
         m = self.markers()
+        live = self.dir / "live.txt"
         return {
             "session": str(self.dir),
             "logel": str(self.logel) if self.logel else None,
             "size_bytes": self.size_bytes,
             "has_stop_marker": m["stop"],
             "traceview_cached": self.traceview_dir is not None,
+            "live_txt": str(live) if live.is_file() else None,
         }
 
 
