@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from lcapt.capture import CaptureError, CapturePaths, HeadlessCapture, port_busy_hint
+from lcapt.capture import (
+    CaptureError,
+    CapturePaths,
+    HeadlessCapture,
+    other_logel_pids,
+    other_logel_warning,
+    port_busy_hint,
+)
 
 
 def _paths(tmp_path: Path) -> CapturePaths:
@@ -61,3 +68,18 @@ def test_port_busy_hint_only_when_port_open_failed():
     assert "Open Diag Port fail" in hint
     assert "COM port" in hint
     assert "Close them and retry" in hint
+
+
+def test_other_logel_warning_empty_when_no_pids(monkeypatch):
+    monkeypatch.setattr("lcapt.capture._logel_pids", lambda: [])
+    assert other_logel_pids() == []
+    assert other_logel_warning() == ""
+
+
+def test_other_logel_warning_lists_pids_and_excludes_own(monkeypatch):
+    monkeypatch.setattr("lcapt.capture._logel_pids", lambda: [111, 222, 333])
+    assert other_logel_pids(exclude_pid=222) == [111, 333]
+    warn = other_logel_warning(exclude_pid=222)
+    assert "111" in warn and "333" in warn and "222" not in warn
+    assert "DIAG" in warn
+    assert "GUI" in warn

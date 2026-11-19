@@ -6,6 +6,22 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 
 ## [Unreleased]
 
+### 新增
+
+- **`doctor` / `capture` 启动前检测其它 `Logel.exe`**：若已有 GUI 或残留进程，给出软警告
+  （列出 PID，提示 DIAG 可能被占）。`doctor` 该项为非硬性检查（不因此 exit 2）；
+  `capture` 仍继续启动，真正占口时仍靠原有 `Open Diag Port fail` 提示。
+- **`--out` / `LCAPT_OUT` / 解析后的输出目录启动前校验纯 ASCII**：含中文等非 ASCII 时立即
+  exit 2，不再等到会话超时。
+- 控制台关闭（点 X）时尽力向隐藏 Logel 发 `WM_CLOSE`，减少孤儿进程占 DIAG。
+
+### 变更
+
+- `doctor` 软检查失败显示 **`WARN`**（不再与硬失败同用 `ERR`）；JSON 增加 `hard` 字段。
+- `serial ports` 改为软检查（未插机也可 doctor 通过）。
+- `--out` 帮助文案与默认一致：`<Logel>\..\Logel_History`，并注明须纯 ASCII。
+- `abort()` 失败兜底改为先 `WM_CLOSE` 再短等，最后才 `kill`。
+
 ## [1.0.0] - 2026-11-19
 
 首发版本：不开 GUI 抓展锐（Unisoc / SPRD）Logel 日志。

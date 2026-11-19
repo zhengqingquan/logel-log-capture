@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lcapt.cli import build_parser, capture_seconds, default_out_dir
+import pytest
+
+from lcapt.cli import (
+    PathConstraintError,
+    assert_ascii_path,
+    build_parser,
+    capture_seconds,
+    default_out_dir,
+)
 from lcapt.profile import COPY_SUFFIXES, profile_patches
 
 
@@ -106,3 +114,20 @@ def test_all_help_text_is_ascii():
             texts.extend(a.help or "" for a in sub._actions)  # noqa: SLF001
     for text in texts:
         text.encode("ascii")
+
+
+def test_out_help_mentions_logel_history_and_ascii():
+    parser = build_parser()
+    helps = [a.help or "" for a in parser._actions]  # noqa: SLF001
+    for action in parser._subparsers._group_actions:  # noqa: SLF001
+        for sub in action.choices.values():
+            helps.extend(a.help or "" for a in sub._actions)  # noqa: SLF001
+    joined = "\n".join(helps)
+    assert "Logel_History" in joined
+    assert "ASCII" in joined
+
+
+def test_assert_ascii_path_rejects_non_ascii():
+    assert_ascii_path(Path(r"D:\Unisoc_Tool\Logel_History"), label="--out")
+    with pytest.raises(PathConstraintError, match="ASCII"):
+        assert_ascii_path(Path(r"D:\测试\log"), label="--out")

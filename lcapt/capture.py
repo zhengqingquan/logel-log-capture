@@ -116,11 +116,32 @@ def _logel_pids() -> List[int]:
     return pids
 
 
+def other_logel_pids(exclude_pid: Optional[int] = None) -> List[int]:
+    """除 exclude_pid 外仍在跑的 Logel.exe PID（升序去重）。"""
+    pids = set(_logel_pids())
+    if exclude_pid is not None:
+        pids.discard(int(exclude_pid))
+    return sorted(pids)
+
+
+def other_logel_warning(exclude_pid: Optional[int] = None) -> str:
+    """启动前软警告：已有其它 Logel（含 GUI）时 DIAG 可能被占。无则返回空串。"""
+    others = other_logel_pids(exclude_pid)
+    if not others:
+        return ""
+    listed = ", ".join(str(p) for p in others)
+    return (
+        f"Other Logel.exe process(es) already running: {listed}. "
+        "They may hold the DIAG COM port (GUI capture or a leftover from a previous run). "
+        "Close them before capture, or expect Open Diag Port fail."
+    )
+
+
 def port_busy_hint(log_text: str, own_pid: Optional[int] = None) -> str:
     """Logel 日志里出现 `Open Diag Port fail` 时，给出「串口被占用」的排查提示。"""
     if "Open Diag Port fail" not in log_text:
         return ""
-    others = [p for p in _logel_pids() if p != own_pid]
+    others = other_logel_pids(own_pid)
     hint = (
         "Logel reports 'Open Diag Port fail': the DIAG COM port is likely held by another "
         "Logel or serial tool (a stray process left by an earlier failed capture, or a "
@@ -303,8 +324,56 @@ class HeadlessCapture:
         )
 
     def abort(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
+        """失败兜底：先 WM_CLOSE，短等后再 kill（避免直接 taskkill 撕坏 .logel）。"""
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            win = win32.find_main_window(self.proc.pid, self.paths.class_name)
+            if win is None:
+                win = win32.find_main_window(None, self.paths.class_name)
+            if win is not None:
+                win32.post_close(win.hwnd)
+                try:
+                    self.proc.wait(timeout=8)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception:
+            pass
+        if self.proc.poll() is None:
             self.proc.kill()
+
+    def _install_console_close_hook(self) -> None:
+        """控制台点 X / 注销时尽量 WM_CLOSE，减少孤儿 Logel 占 DIAG。"""
+        if os.name != "nt":
+            return
+        import ctypes
+
+        HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+        # CTRL_CLOSE_EVENT=2, CTRL_LOGOFF=5, CTRL_SHUTDOWN=6
+        close_kinds = {2, 5, 6}
+
+        def _handler(ctrl_type: int) -> int:
+            if int(ctrl_type) not in close_kinds:
+                return 0
+            try:
+                self._log("[capture] console closing; sending WM_CLOSE to Logel")
+                if self.proc is not None and self.proc.poll() is None:
+                    win = win32.find_main_window(self.proc.pid, self.paths.class_name)
+                    if win is None:
+                        win = win32.find_main_window(None, self.paths.class_name)
+                    if win is not None:
+                        win32.post_close(win.hwnd)
+                        try:
+                            self.proc.wait(timeout=8)
+                        except subprocess.TimeoutExpired:
+                            pass
+            except Exception:
+                pass
+            return 1
+
+        self._console_handler = HandlerRoutine(_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(self._console_handler, True)
 
     # --------------------------------------------------------- 一次完整跑
     def run(
@@ -325,6 +394,7 @@ class HeadlessCapture:
         try:
             self.acquire_lock()
             self.start()
+            self._install_console_close_hook()
             session = self.wait_ready()
             conn = self._conn()
             try:

@@ -67,7 +67,7 @@ lcapt stop                             # 发 WM_CLOSE 收尾（不会 kill）
 
 | 命令 | 说明 |
 |------|------|
-| `doctor` | 环境自检，硬性检查不过返回 2 |
+| `doctor` | 环境自检（含其它 Logel 软检查）；硬性检查不过返回 2 |
 | `provision [--link] [--force] [--max-size-mb N]` | 建/刷新 profile。`--link` 用硬链接镜像（配置类文件仍复制） |
 | `capture [-d SEC] [--export] [--no-playback] [--ue-base T] [--min-bytes N] [--max-bytes N]` | 抓取。`-d 0` / 负数 = 抓到 Ctrl+C/`stop`；`--max-bytes` 达上限提前收尾 |
 | `stop` | 按窗口类名找隐藏窗口发 `WM_CLOSE` |
@@ -94,12 +94,14 @@ lcapt stop                             # 发 WM_CLOSE 收尾（不会 kill）
 
 | 码 | 含义 |
 |----|------|
-| 0 | 成功 |
-| 2 | 前置检查失败（找不到 Logel / profile / logel2txt、串口不可用等） |
+| 0 | 成功（`doctor` 仅有软警告 `WARN` 时也是 0） |
+| 2 | 硬性前置失败（找不到 Logel / profile、输出目录不可写、`--out` 非 ASCII 等） |
 | 3 | 抓取失败（没认到 DIAG 口、Logel 提前退出等） |
 | 4 | 停止失败（`WM_CLOSE` 后超时，可能弹了模态框） |
 | 5 | 抓取成功但导出失败 |
 | 130 | Ctrl+C |
+
+说明：`logel2txt` 缺失、未插机无串口、已有其它 Logel 进程等为 **软检查**（`WARN`），不单独导致 exit 2。
 
 ## 一次抓取实际发生了什么
 
@@ -119,9 +121,11 @@ provision → 起 Logel.exe -w hide -n LogelCapture（cwd=profile\Bin）
 
 - **`Module` 列恒为空**：logel2txt 从 `traceview.dat/.pbs` 取的是已解码文本，缓存里没有模块名；模块名只存在于 Logel 现场解析的内存里。要模块列只能用 Logel GUI「Export To Text File」。
 - **回放/CLI 导出可能被解析库卡住**：若 `.lst` 里 `Modem Version` 为空，且 ini 里配置的外部/内部 Parser 路径本机不可达，Logel 会弹隐藏模态框「No modem version found…」并挂住。本工具默认 playback 导出时会自动点掉该框，并容忍写完 `*_pb` 后的 `0xC0000005`；`--no-playback` 可退回读抓取缓存。
-- 同一台机器同时只能跑一个抓取（`<profile>\.lcapt.lock`）；同事 GUI 占用同一 DIAG 口会抢串口。
+- 同一台机器同时只能跑一个抓取（`<profile>\.lcapt.lock`）；同事 GUI **正在连 DIAG** 时会抢口。只开 GUI、未抓取时通常不占 DIAG。
+- **抓取期间可发 AT**（AT 口与 DIAG 分离；实测可行）。烧写 / `dloader` 软触发前请先 `lcapt stop` 并关掉正在抓的 Logel。
 - 工具报错弹窗仍可能卡住无人值守抓取（profile 已设 `ShowException=0`、`PlaySound=0`，不能 100% 免疫）。
 - `MaxTime` / `MaxSize` 的单位官方未写死，本工具不依赖它们做分段；需要分段请用 `-d` 多次调用。
+- 直接点控制台窗口 X 仍可能来不及收尾；优先 Ctrl+C 或 `lcapt stop`。
 
 ## 故障排查
 
@@ -129,6 +133,7 @@ provision → 起 Logel.exe -w hide -n LogelCapture（cwd=profile\Bin）
 |------|------|
 | `SPRD DIAG port not detected` | 设备管理器确认有 `SPRD DIAG (COMxx)`；关掉占用该口的其它程序；确认 `[MS] AutoIdentifyPort=1` |
 | `Open Diag Port fail` / 超时 | DIAG 口多半被其它 Logel / 串口工具占用；看报错里列出的残留 PID |
+| `doctor` 报 `other Logel processes` / capture 启动前 `[WARN]` | 已有 GUI 或残留 `Logel.exe`；先关掉再抓（软提示，不阻止启动） |
 | Logel 提前退出 | 看 `<profile>\Bin\Log\Application.log` 末尾；多为版本/解析库不匹配 |
 | `WM_CLOSE` 后仍不退出 | 大概率弹了模态框；人工结束该进程，`Application.log` 能看到卡在哪 |
 | `.logel` 为空 | 设备侧未开 armlog：`AT+ARMLOG=1`（DSP log 用 `AT+SPDSPOP=2`） |

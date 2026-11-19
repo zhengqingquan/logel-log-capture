@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import __version__
-from .capture import CaptureError, CapturePaths, HeadlessCapture, stop_running
+from .capture import (
+    CaptureError,
+    CapturePaths,
+    HeadlessCapture,
+    other_logel_pids,
+    other_logel_warning,
+    stop_running,
+)
 from .export import ExportError, export_session, find_logel2txt, list_com_ports
 from .logel import LogelLayoutError, find_install, list_sessions, read_ini, ini_get
 from .profile import provision
@@ -45,12 +52,26 @@ def default_out_dir(profile_dir: Path, logel: Optional[str] = None) -> Path:
     env = os.environ.get("LCAPT_OUT")
     if env:
         return Path(env)
-    # 默认落到 Logel 自己的 Logel_History（<安装目录>\Logel_History），和 GUI 抓的一致
+    # 默认落到 <Logel 安装目录>\..\Logel_History（与 GUI 抓取同级）
     try:
         install = find_install(logel)
     except LogelLayoutError:
         return profile_dir / "out"
     return install.root.parent / "Logel_History"
+
+
+class PathConstraintError(RuntimeError):
+    """输出路径等硬约束不满足（例如含中文）。"""
+
+
+def assert_ascii_path(path: Path, *, label: str = "--out") -> None:
+    """Logel 对非 ASCII 输出路径会建会话失败；启动前直接拒绝。"""
+    text = os.fspath(path)
+    if not text.isascii():
+        raise PathConstraintError(
+            f"{label} must be a pure ASCII path (no CJK/non-ASCII characters). "
+            f"Got: {path}. Write to an ASCII directory first, then copy elsewhere."
+        )
 
 
 # ------------------------------------------------------------------- 日志
@@ -140,6 +161,9 @@ def cmd_capture(args, log: Logger) -> int:
         provision(install, profile_dir, out_dir, link=args.link, log=log)
 
     paths = CapturePaths(profile_dir=profile_dir, out_dir=out_dir, class_name=args.class_name)
+    warn = other_logel_warning()
+    if warn:
+        log(f"[capture][WARN] {warn}")
     cap = HeadlessCapture(paths, log=log)
     started = time.time()
     try:
@@ -253,7 +277,7 @@ def cmd_doctor(args, log: Logger) -> int:
 
     def add(name: str, ok: bool, detail: str, hard: bool = True) -> None:
         nonlocal problems
-        checks.append({"check": name, "ok": ok, "detail": detail})
+        checks.append({"check": name, "ok": ok, "detail": detail, "hard": hard})
         if not ok and hard:
             problems += 1
 
@@ -298,7 +322,27 @@ def cmd_doctor(args, log: Logger) -> int:
         add("logel2txt", False, str(exc), hard=False)
 
     ports = list_com_ports()
-    add("serial ports", bool(ports), ", ".join(ports) if ports else "no COM ports found")
+    add(
+        "serial ports",
+        bool(ports),
+        ", ".join(ports) if ports else "no COM ports found (device may be unplugged)",
+        hard=False,
+    )
+
+    others = other_logel_pids()
+    add(
+        "other Logel processes",
+        not others,
+        (
+            "none"
+            if not others
+            else (
+                f"running PID(s): {', '.join(map(str, others))}; "
+                "DIAG may be held — close GUI/stray Logel before capture"
+            )
+        ),
+        hard=False,
+    )
 
     lock = profile_dir / ".lcapt.lock"
     add(
@@ -307,7 +351,12 @@ def cmd_doctor(args, log: Logger) -> int:
         "no capture running" if not lock.is_file() else f"lock present: {lock}",
     )
 
-    human = [f"{'OK ' if c['ok'] else 'ERR'}  {c['check']:<20} {c['detail']}" for c in checks]
+    def _mark(c: Dict[str, object]) -> str:
+        if c["ok"]:
+            return "OK  "
+        return "ERR " if c.get("hard", True) else "WARN"
+
+    human = [f"{_mark(c)} {c['check']:<20} {c['detail']}" for c in checks]
     if problems:
         human.append("")
         human.append("Hard checks failed; fix them before capturing.")
@@ -332,8 +381,13 @@ def _paths(args) -> "tuple[Path, Path]":
     profile_dir = Path(args.profile).expanduser() if args.profile else default_profile_dir()
     if args.out:
         out_dir = Path(args.out).expanduser()
+        assert_ascii_path(out_dir, label="--out")
     else:
         out_dir = default_out_dir(profile_dir, getattr(args, "logel", None))
+        if os.environ.get("LCAPT_OUT"):
+            assert_ascii_path(out_dir, label="LCAPT_OUT")
+        else:
+            assert_ascii_path(out_dir, label="output dir")
     return profile_dir, out_dir
 
 
@@ -355,7 +409,14 @@ def _add_common(p: argparse.ArgumentParser, *, suppress: bool) -> None:
             "%%LOCALAPPDATA%%\\logel-log-capture\\profile)"
         ),
     )
-    p.add_argument("--out", default=d(None), help="Capture output dir (default: <profile>\\out)")
+    p.add_argument(
+        "--out",
+        default=d(None),
+        help=(
+            "Capture output dir (default: <Logel>\\..\\Logel_History, else <profile>\\out; "
+            "must be pure ASCII)"
+        ),
+    )
     p.add_argument("--json", action="store_true", default=d(False), help="Output JSON")
     p.add_argument("-q", "--quiet", action="store_true", default=d(False), help="Only output results")
     if not suppress:
@@ -377,7 +438,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=help_text, parents=[_common_parent()])
         return sp
 
-    p = new("doctor", "Environment self-check (Logel / profile / serial ports / logel2txt)")
+    p = new(
+        "doctor",
+        "Environment self-check (Logel / profile / serial / other Logel / logel2txt)",
+    )
     p.add_argument("--logel2txt", default=None)
     p.set_defaults(func=cmd_doctor)
 
@@ -452,6 +516,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         print("[lcapt] interrupted", file=sys.stderr)
         return 130
-    except (LogelLayoutError, ExportError, CaptureError) as exc:
+    except (LogelLayoutError, ExportError, CaptureError, PathConstraintError) as exc:
         print(f"[lcapt] {exc}", file=sys.stderr)
         return EXIT_PREFLIGHT
