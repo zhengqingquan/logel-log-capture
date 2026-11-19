@@ -19,6 +19,8 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
   （exit 3）；短抖动 OUT→IN 不误停。口恢复后需重新 `capture`（新会话）。
 - **`lcapt watch`**：常驻等待 **SPRD DIAG** 出现 → settle → 自动开抓；掉线停抓释放后
   继续等下一轮（烧写后开机无需再手动开抓）。`--once` 只跑一轮；默认 `-d 0` 抓到掉线。
+  口仍在但连续抓取失败时指数退避（2s…60s），默认 `--max-failures 5` 后退出（`0`=不限）；
+  成功或 DIAG 消失再出现时清零计数。
 
 ### 修复
 
@@ -35,6 +37,7 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 - `--out` 帮助文案与默认一致：`<Logel>\..\Logel_History`，并注明须纯 ASCII。
 - `abort()` 失败兜底改为先 `WM_CLOSE` 再短等，最后才 `kill`。
 - `lcapt stop` 清锁改为等窗口消失，或 launcher 与 Logel **均**退出（避免 launcher 先死误清锁）。
+- 移除 `provision --max-size-mb`：不再把未证实单位的 `MaxSize` 写入 ini；分段用 `-d` / `--max-bytes`。
 
 ## [1.0.0] - 2026-11-19
 

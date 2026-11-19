@@ -76,9 +76,9 @@ lcapt watch --logel "<Logel>"          # 默认每轮抓到掉线；Ctrl+C 结�
 | 命令 | 说明 |
 |------|------|
 | `doctor` | 环境自检（含其它 Logel 软检查）；硬性检查不过返回 2 |
-| `provision [--link] [--force] [--max-size-mb N]` | 建/刷新 profile。`--link` 用硬链接镜像（配置类文件仍复制） |
+| `provision [--link] [--force]` | 建/刷新 profile。`--link` 用硬链接镜像（配置类文件仍复制） |
 | `capture [-d SEC] [--export] [--no-playback] [--ue-base T] [--min-bytes N] [--max-bytes N]` | 抓取。`-d 0` / 负数 = 抓到 Ctrl+C/`stop`；`--max-bytes` 达上限提前收尾 |
-| `watch [-d SEC] [--settle SEC] [--poll SEC] [--once]` | 等到 **SPRD DIAG** 出现后自动 `capture`；掉线释放后再等。适合烧写后开机抓 log |
+| `watch [-d SEC] [--settle SEC] [--poll SEC] [--once] [--max-failures N]` | 等到 **SPRD DIAG** 出现后自动 `capture`；掉线释放后再等。口仍在但连续失败时指数退避，达上限退出。适合烧写后开机抓 log |
 | `stop` | 按窗口类名找隐藏窗口发 `WM_CLOSE` |
 | `list [--limit N]` | 会话列表（大小 / 是否完整收尾 / 是否有解码缓存） |
 | `export [SESSION] [-o FILE] [--ue-base T] [--no-playback]` | 调 logel2txt 导出；省略 SESSION 取最新 |
@@ -134,7 +134,7 @@ provision → 起 Logel.exe -w hide -n LogelCapture（cwd=profile\Bin）
 - **抓取期间可发 AT**（AT 口与 DIAG 分离；实测可行）。烧写 / `dloader` 软触发前请先 `lcapt stop` 并关掉正在抓的 Logel。
 - **DIAG 掉线会自动停抓并释放端口**（约 3 秒无重连）：不会在空挂状态占口；口回来后请重新开一轮 `capture`（不自动续抓）。
 - 工具报错弹窗仍可能卡住无人值守抓取（profile 已设 `ShowException=0`、`PlaySound=0`，不能 100% 免疫）。
-- `MaxTime` / `MaxSize` 的单位官方未写死，本工具不依赖它们做分段；需要分段请用 `-d` 多次调用。
+- 不写也不暴露 Logel 的 `MaxTime` / `MaxSize`（单位官方未证实）；需要分段请用 `-d` / `--max-bytes`。
 - 直接点控制台窗口 X 仍可能来不及收尾；优先 Ctrl+C 或 `lcapt stop`。
 
 ## 故障排查

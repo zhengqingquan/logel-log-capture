@@ -39,10 +39,33 @@ EXIT_EXPORT = 5
 
 DEFAULT_CLASS = os.environ.get("LCAPT_WINDOW_CLASS", "LogelCapture")
 
+#: watch 连续失败退避：第 n 次失败等待 min(cap, base * 2^(n-1)) 秒
+WATCH_BACKOFF_BASE_SEC = 2.0
+WATCH_BACKOFF_CAP_SEC = 60.0
+WATCH_DEFAULT_MAX_FAILURES = 5
+
 
 def capture_seconds(value: Optional[float]) -> Optional[float]:
     """`-d 0` / 负数 = 不定长：一直抓到 Ctrl+C 或外部 `lcapt stop`。"""
     return value if value is not None and value > 0 else None
+
+
+def watch_capture_ok(rc: int) -> bool:
+    """本轮抓取本身成功（含仅导出失败），用于清零连续失败计数。"""
+    return rc in (EXIT_OK, EXIT_EXPORT)
+
+
+def watch_backoff_sec(
+    fail_count: int,
+    *,
+    base: float = WATCH_BACKOFF_BASE_SEC,
+    cap: float = WATCH_BACKOFF_CAP_SEC,
+) -> float:
+    """第 fail_count 次连续失败后的休眠秒数（fail_count>=1）。"""
+    if fail_count <= 0:
+        return 0.0
+    delay = float(base) * (2 ** (fail_count - 1))
+    return min(float(cap), delay)
 
 
 # --------------------------------------------------------------- 路径默认值
@@ -121,7 +144,6 @@ def cmd_provision(args, log: Logger) -> int:
             out_dir,
             link=args.link,
             force_mirror=args.force,
-            max_size_mb=args.max_size_mb,
             log=log,
         )
     except (OSError, RuntimeError) as exc:
@@ -233,7 +255,11 @@ def cmd_capture(args, log: Logger) -> int:
 
 
 def cmd_watch(args, log: Logger) -> int:
-    """常驻：等到 SPRD DIAG 出现 → settle → 抓一轮 →（掉线或结束后）再等。"""
+    """常驻：等到 SPRD DIAG 出现 → settle → 抓一轮 →（掉线或结束后）再等。
+
+    口仍在但连续抓取失败时指数退避，避免 Open Diag Port fail 等打爆日志；
+    达到 ``--max-failures`` 后退出。DIAG 消失再出现时清零失败计数。
+    """
     try:
         profile_dir, _out_dir, paths = _prepare_profile(args, log)
     except LogelLayoutError as exc:
@@ -245,16 +271,20 @@ def cmd_watch(args, log: Logger) -> int:
 
     poll = max(0.2, float(args.poll))
     settle = max(0.0, float(args.settle))
+    max_failures = int(args.max_failures)
     round_no = 0
+    fail_count = 0
     last_rc = EXIT_OK
     log(
         "[watch] armed: will start capture when SPRD DIAG appears "
-        f"(poll={poll}s, settle={settle}s, duration={args.duration}, once={bool(args.once)})"
+        f"(poll={poll}s, settle={settle}s, duration={args.duration}, once={bool(args.once)}, "
+        f"max_failures={max_failures if max_failures > 0 else 'unlimited'})"
     )
     try:
         while True:
             ports = find_sprd_diag_ports()
             if not ports:
+                fail_count = 0
                 ports = wait_for_sprd_diag(poll_sec=poll, log=log)
             log(f"[watch] SPRD DIAG present: {', '.join(ports)}")
             if settle:
@@ -263,17 +293,35 @@ def cmd_watch(args, log: Logger) -> int:
                 ports = find_sprd_diag_ports()
                 if not ports:
                     log("[watch] DIAG disappeared during settle; waiting again")
+                    fail_count = 0
                     continue
             round_no += 1
             log(f"[watch] capture round {round_no}")
             last_rc = _run_one_capture(args, log, paths, profile_dir)
             if args.once:
                 return last_rc
+            if watch_capture_ok(last_rc):
+                fail_count = 0
+            else:
+                fail_count += 1
+                delay = watch_backoff_sec(fail_count)
+                log(
+                    f"[watch] capture failed (rc={last_rc}), consecutive={fail_count}; "
+                    f"backoff {delay:.0f}s"
+                )
+                if max_failures > 0 and fail_count >= max_failures:
+                    log(
+                        f"[watch] reached --max-failures ({max_failures}); exiting"
+                    )
+                    return last_rc
+                time.sleep(delay)
             # 口还在则稍等再开下一轮；口没了则回到等待（烧写场景）
             if find_sprd_diag_ports():
-                time.sleep(poll)
+                if watch_capture_ok(last_rc):
+                    time.sleep(poll)
             else:
                 log("[watch] DIAG gone after capture; waiting for next appearance")
+                fail_count = 0
     except KeyboardInterrupt:
         log("[watch] interrupted")
         return 130
@@ -518,7 +566,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = new("provision", "Create/refresh an independent headless profile")
     p.add_argument("--force", action="store_true", help="Force re-mirror of Bin")
     p.add_argument("--link", action="store_true", help="Mirror with hard links (fast, no extra space)")
-    p.add_argument("--max-size-mb", type=int, default=None, help="Max single-file size written to logel.ini")
     p.set_defaults(func=cmd_provision)
 
     p = new("capture", "Headless capture (default 60s)")
@@ -581,6 +628,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--once",
         action="store_true",
         help="Capture only one round after DIAG appears, then exit",
+    )
+    p.add_argument(
+        "--max-failures",
+        type=int,
+        default=WATCH_DEFAULT_MAX_FAILURES,
+        help=(
+            "Exit after this many consecutive capture failures while DIAG stays present "
+            f"(default {WATCH_DEFAULT_MAX_FAILURES}; 0 = unlimited). Success or DIAG gone "
+            "resets the counter; failures use exponential backoff "
+            f"({WATCH_BACKOFF_BASE_SEC:.0f}s .. {WATCH_BACKOFF_CAP_SEC:.0f}s)"
+        ),
     )
     p.set_defaults(func=cmd_watch, playback=True)
 

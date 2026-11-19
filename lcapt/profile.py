@@ -14,7 +14,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 from .logel import LogelInstall, ini_patch, read_ini, write_ini
 
@@ -67,11 +67,12 @@ def provision(
     link: bool = False,
     title: str = "LCAPT",
     force_mirror: bool = False,
-    max_size_mb: Optional[int] = None,
-    max_time_min: Optional[int] = None,
     log=print,
 ) -> ProvisionResult:
-    """建/更新独立无头 profile。已存在时只刷新 ini（除非 force_mirror）。"""
+    """建/更新独立无头 profile。已存在时只刷新 ini（除非 force_mirror）。
+
+    不写 MaxSize/MaxTime：官方单位未证实，分段请用 ``lcapt capture -d`` / ``--max-bytes``。
+    """
     profile_dir = profile_dir.expanduser().resolve()
     bin_dir = profile_dir / "Bin"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -90,12 +91,6 @@ def provision(
         raise RuntimeError(f"logel.ini missing from profile: {ini}")
 
     patches = profile_patches(out_dir, title)
-    if max_size_mb:
-        patches[("Settings", "SaveMode")] = "1"
-        patches[("Settings", "MaxSize")] = str(int(max_size_mb))
-    if max_time_min:
-        patches[("Settings", "SaveMode")] = "0"
-        patches[("Settings", "MaxTime")] = str(int(max_time_min))
 
     text = read_ini(ini)
     new_text, missing = ini_patch(text, patches)
