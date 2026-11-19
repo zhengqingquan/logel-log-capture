@@ -13,6 +13,7 @@ from lcapt.logel import (
     ini_get,
     ini_patch,
     list_sessions,
+    update_diag_lost_since,
 )
 
 
@@ -72,6 +73,28 @@ def test_analyze_connect_log_no_device():
     assert conn["connected"] is False
     assert conn["no_diag_port"] is True
     assert conn["diag_port"] is None
+
+
+def test_update_diag_lost_since_out_then_in_clears():
+    out = "CMainFrame::RecvDeviceChange: [OUT] port 31, SPRD DIAG\n"
+    back = "CMainFrame::RecvDeviceChange: [IN ] port 31, SPRD DIAG\n"
+    lost = update_diag_lost_since(out, 31, None, now=100.0)
+    assert lost == 100.0
+    lost = update_diag_lost_since(back, 31, lost, now=101.0)
+    assert lost is None
+
+
+def test_update_diag_lost_since_ignores_other_ports():
+    chunk = "CMainFrame::RecvDeviceChange: [OUT] port 30, SPRD CP LOG\n"
+    assert update_diag_lost_since(chunk, 31, None, now=50.0) is None
+
+
+def test_update_diag_lost_since_same_chunk_out_in():
+    chunk = (
+        "CMainFrame::RecvDeviceChange: [OUT] port 31, SPRD DIAG\n"
+        "CMainFrame::RecvDeviceChange: [IN ] port 31, SPRD DIAG\n"
+    )
+    assert update_diag_lost_since(chunk, 31, None, now=10.0) is None
 
 
 def _fake_session(root: Path, name: str, *, logel_bytes: int = 1024, stop: bool = True) -> Path:

@@ -22,6 +22,11 @@ _OPEN_DIAG_RE = re.compile(r"ConnectByUART: Open Diag Port (\d+)")
 _NO_DIAG_RE = re.compile(r"No Diag Port matched")
 _NO_LOG_RE = re.compile(r"No Log Port found")
 _VERSION_RE = re.compile(r"Logel tool version:\s*(\S+)")
+#: 拔插 DIAG：`RecvDeviceChange: [OUT] port 31, SPRD DIAG` / `[IN ] port 31, ...`
+_DEVICE_CHANGE_RE = re.compile(
+    r"RecvDeviceChange:\s*\[(OUT|IN\s*)\]\s*port\s+(\d+)",
+    re.IGNORECASE,
+)
 
 
 class LogelLayoutError(RuntimeError):
@@ -269,6 +274,35 @@ def analyze_connect_log(text: str) -> Dict[str, object]:
         "no_log_port": bool(_NO_LOG_RE.search(text)),
         "tool_version": version.group(1) if version else None,
     }
+
+
+def update_diag_lost_since(
+    chunk: str,
+    diag_port: int,
+    lost_since: Optional[float],
+    now: float,
+) -> Optional[float]:
+    """按日志片段里的 IN/OUT 顺序更新「DIAG 丢失起始时间」。
+
+    返回 None 表示当前认为口仍在；返回时间戳表示从该时刻起处于 OUT。
+    短抖动（OUT 后很快 IN）会清掉 lost_since。
+    """
+    if not chunk or not diag_port:
+        return lost_since
+    events: List[Tuple[int, str]] = []
+    for m in _DEVICE_CHANGE_RE.finditer(chunk):
+        if int(m.group(2)) != int(diag_port):
+            continue
+        kind = "OUT" if m.group(1).upper().startswith("OUT") else "IN"
+        events.append((m.start(), kind))
+    events.sort(key=lambda item: item[0])
+    for _, kind in events:
+        if kind == "OUT":
+            if lost_since is None:
+                lost_since = now
+        else:
+            lost_since = None
+    return lost_since
 
 
 # --------------------------------------------------------------- 会话

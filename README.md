@@ -123,6 +123,7 @@ provision → 起 Logel.exe -w hide -n LogelCapture（cwd=profile\Bin）
 - **回放/CLI 导出可能被解析库卡住**：若 `.lst` 里 `Modem Version` 为空，且 ini 里配置的外部/内部 Parser 路径本机不可达，Logel 会弹隐藏模态框「No modem version found…」并挂住。本工具默认 playback 导出时会自动点掉该框，并容忍写完 `*_pb` 后的 `0xC0000005`；`--no-playback` 可退回读抓取缓存。
 - 同一台机器同时只能跑一个抓取（`<profile>\.lcapt.lock`）；同事 GUI **正在连 DIAG** 时会抢口。只开 GUI、未抓取时通常不占 DIAG。
 - **抓取期间可发 AT**（AT 口与 DIAG 分离；实测可行）。烧写 / `dloader` 软触发前请先 `lcapt stop` 并关掉正在抓的 Logel。
+- **DIAG 掉线会自动停抓并释放端口**（约 3 秒无重连）：不会在空挂状态占口；口回来后请重新开一轮 `capture`（不自动续抓）。
 - 工具报错弹窗仍可能卡住无人值守抓取（profile 已设 `ShowException=0`、`PlaySound=0`，不能 100% 免疫）。
 - `MaxTime` / `MaxSize` 的单位官方未写死，本工具不依赖它们做分段；需要分段请用 `-d` 多次调用。
 - 直接点控制台窗口 X 仍可能来不及收尾；优先 Ctrl+C 或 `lcapt stop`。
@@ -133,6 +134,7 @@ provision → 起 Logel.exe -w hide -n LogelCapture（cwd=profile\Bin）
 |------|------|
 | `SPRD DIAG port not detected` | 设备管理器确认有 `SPRD DIAG (COMxx)`；关掉占用该口的其它程序；确认 `[MS] AutoIdentifyPort=1` |
 | `Open Diag Port fail` / 超时 | DIAG 口多半被其它 Logel / 串口工具占用；看报错里列出的残留 PID |
+| `DIAG port N disconnected` | 抓取中设备拔线/口消失，已自动 `WM_CLOSE` 释放；插回后重新 `capture` |
 | `doctor` 报 `other Logel processes` / capture 启动前 `[WARN]` | 已有 GUI 或残留 `Logel.exe`；先关掉再抓（软提示，不阻止启动） |
 | Logel 提前退出 | 看 `<profile>\Bin\Log\Application.log` 末尾；多为版本/解析库不匹配 |
 | `WM_CLOSE` 后仍不退出 | 大概率弹了模态框；人工结束该进程，`Application.log` 能看到卡在哪 |

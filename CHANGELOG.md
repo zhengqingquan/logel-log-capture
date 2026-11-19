@@ -14,6 +14,9 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 - **`--out` / `LCAPT_OUT` / 解析后的输出目录启动前校验纯 ASCII**：含中文等非 ASCII 时立即
   exit 2，不再等到会话超时。
 - 控制台关闭（点 X）时尽力向隐藏 Logel 发 `WM_CLOSE`，减少孤儿进程占 DIAG。
+- **抓取中 DIAG 掉线自动停**：`Application.log` 出现对应口的 `RecvDeviceChange: [OUT]`
+  且约 3 秒内无 `[IN ]` 重连时，发 `WM_CLOSE` 收尾释放端口，并以抓取失败退出
+  （exit 3）；短抖动 OUT→IN 不误停。口恢复后需重新 `capture`（新会话）。
 
 ### 变更
 

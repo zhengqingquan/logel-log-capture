@@ -18,7 +18,16 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import win32
-from .logel import AppLogTail, Session, analyze_connect_log, find_new_session
+from .logel import (
+    AppLogTail,
+    Session,
+    analyze_connect_log,
+    find_new_session,
+    update_diag_lost_since,
+)
+
+#: Application.log 出现 DIAG OUT 后，超过此时长仍无 IN 则自动停抓并释放端口
+DIAG_LOST_DEBOUNCE_SEC = 3.0
 
 
 class CaptureError(RuntimeError):
@@ -259,32 +268,51 @@ class HeadlessCapture:
         *,
         max_bytes: Optional[int] = None,
         progress_every: float = 5.0,
-    ) -> bool:
+        diag_port: Optional[int] = None,
+        lost_debounce_sec: float = DIAG_LOST_DEBOUNCE_SEC,
+    ) -> Tuple[bool, Optional[str]]:
         """抓取主循环。duration_sec=None 表示抓到 Ctrl+C / 进程结束 / 外部 `lcapt stop`。
 
-        返回 True 表示到点/到量，由本进程负责收尾；False 表示 Logel 已经自己退出了
-        （通常是另一个终端跑了 `lcapt stop`，发了 WM_CLOSE），此时不该再发一次关闭信号。
+        返回 (need_stop, lost_reason)：
+        - need_stop True：到点/到量/DIAG 掉线，由本进程 WM_CLOSE 收尾；
+        - need_stop False：Logel 已自己退出（如外部 stop），不要再发关闭；
+        - lost_reason：非空表示因 DIAG 丢失而停。
         """
         assert self.proc is not None
         started = time.time()
         last_report = 0.0
+        lost_since: Optional[float] = None
+        port = int(diag_port) if diag_port else 0
         while True:
             if self.proc.poll() is not None:
-                return False
-            self._drain_log()
-            elapsed = time.time() - started
+                return False, None
+            now = time.time()
+            chunk = self._drain_log()
+            if port:
+                lost_since = update_diag_lost_since(chunk, port, lost_since, now)
+                if lost_since is not None and (now - lost_since) >= lost_debounce_sec:
+                    reason = (
+                        f"DIAG port {port} disconnected for {lost_debounce_sec:.0f}s+; "
+                        "stopping with WM_CLOSE to release the port. "
+                        "Replug the device and run capture again."
+                    )
+                    self._log(f"[capture] {reason}")
+                    return True, reason
+            elapsed = now - started
             size = self._session_size()
             if progress_every and elapsed - last_report >= progress_every:
                 last_report = elapsed
                 self._log(f"[capture] {int(elapsed)}s captured, .logel {size/1024:.0f} KB")
             if max_bytes and size >= max_bytes:
                 self._log(f"[capture] reached --max-bytes ({max_bytes}), finishing early")
-                return True
+                return True, None
             if duration_sec is not None and elapsed >= duration_sec:
-                return True
+                return True, None
             sleep_for = self._poll
             if duration_sec is not None:
                 sleep_for = min(self._poll, max(0.05, duration_sec - elapsed))
+            if lost_since is not None:
+                sleep_for = min(sleep_for, max(0.05, lost_debounce_sec - (now - lost_since)))
             time.sleep(sleep_for)
 
     def _session(self) -> Optional[Session]:
@@ -390,6 +418,7 @@ class HeadlessCapture:
         conn: Dict[str, object] = {}
         interrupted = False
         external_stop = False
+        port_lost_reason: Optional[str] = None
         exit_code = 0
         try:
             self.acquire_lock()
@@ -398,10 +427,16 @@ class HeadlessCapture:
             session = self.wait_ready()
             conn = self._conn()
             try:
-                finished = self._monitor(duration_sec, max_bytes=max_bytes)
+                diag = conn.get("diag_port")
+                finished, port_lost_reason = self._monitor(
+                    duration_sec,
+                    max_bytes=max_bytes,
+                    diag_port=int(diag) if isinstance(diag, int) else None,
+                )
             except KeyboardInterrupt:
                 interrupted = True
                 finished = True
+                port_lost_reason = None
                 self._log("[capture] Ctrl+C received, stopping gracefully")
             if finished:
                 exit_code = self.stop(stop_timeout)
@@ -436,6 +471,8 @@ class HeadlessCapture:
             warnings.append("Manually interrupted (Ctrl+C)")
         elif external_stop:
             warnings.append("Ended by external `lcapt stop` (WM_CLOSE still used; files intact)")
+        if port_lost_reason:
+            warnings.append(port_lost_reason)
 
         result = CaptureResult(
             session=session,
@@ -449,6 +486,8 @@ class HeadlessCapture:
             warnings=warnings,
         )
         self._write_run_meta(result)
+        if port_lost_reason:
+            raise CaptureError(port_lost_reason)
         return result
 
     def _write_run_meta(self, result: CaptureResult) -> None:

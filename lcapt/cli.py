@@ -175,7 +175,10 @@ def cmd_capture(args, log: Logger) -> int:
         )
     except CaptureError as exc:
         print(f"[lcapt] capture failed: {exc}", file=sys.stderr)
-        return EXIT_STOP if "WM_CLOSE" in str(exc) else EXIT_CAPTURE
+        # Only real stop failures (window missing / close timed out), not "stopped with WM_CLOSE" reasons
+        msg = str(exc)
+        return EXIT_STOP if ("after WM_CLOSE" in msg or "cannot stop safely" in msg) else EXIT_CAPTURE
+
     except OSError as exc:
         print(f"[lcapt] capture failed: {exc}", file=sys.stderr)
         return EXIT_CAPTURE
