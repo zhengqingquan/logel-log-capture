@@ -23,6 +23,7 @@ from .logel import (
     Session,
     analyze_connect_log,
     find_new_session,
+    latest_set_logel_session,
     update_diag_lost_since,
 )
 
@@ -162,6 +163,86 @@ def port_busy_hint(log_text: str, own_pid: Optional[int] = None) -> str:
     return hint
 
 
+@dataclass
+class LockInfo:
+    """`.lcapt.lock` 内容：launcher（lcapt）与 Logel.exe 各记一个 PID。"""
+
+    launcher_pid: int = 0
+    logel_pid: int = 0
+    started_at: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        data: Dict[str, object] = {
+            "pid": self.launcher_pid,
+            "started_at": self.started_at,
+        }
+        if self.logel_pid:
+            data["logel_pid"] = self.logel_pid
+        return data
+
+
+def read_lock_file(lock: Path) -> Optional[LockInfo]:
+    """读锁文件；损坏/缺失返回 None。``pid`` 为 launcher，``logel_pid`` 可选。"""
+    if not lock.is_file():
+        return None
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    try:
+        launcher = int(data.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        launcher = 0
+    try:
+        logel = int(data.get("logel_pid", 0) or 0)
+    except (TypeError, ValueError):
+        logel = 0
+    return LockInfo(
+        launcher_pid=launcher,
+        logel_pid=logel,
+        started_at=str(data.get("started_at") or ""),
+    )
+
+
+def lock_busy_message(info: LockInfo) -> Optional[str]:
+    """锁仍有效（launcher 或 Logel 还活着）时返回拒启说明；陈旧则 None。"""
+    launcher_alive = bool(info.launcher_pid and pid_alive(info.launcher_pid))
+    logel_alive = bool(info.logel_pid and pid_alive(info.logel_pid))
+    if launcher_alive and logel_alive:
+        return (
+            f"Capture already running (launcher pid={info.launcher_pid}, "
+            f"Logel pid={info.logel_pid}); run `lcapt stop` or wait for it"
+        )
+    if launcher_alive:
+        return (
+            f"Capture already running (pid={info.launcher_pid}); "
+            "run `lcapt stop` or wait for it"
+        )
+    if logel_alive:
+        return (
+            f"Orphan Logel still running (pid={info.logel_pid}); the previous launcher "
+            "exited but DIAG may still be held. Run `lcapt stop` or close that Logel, "
+            "then retry"
+        )
+    return None
+
+
+def describe_lock(lock: Path) -> Tuple[bool, str]:
+    """给 doctor 用：(是否空闲可抓, 说明)。陈旧锁视为空闲（下次 capture 会接管）。"""
+    if not lock.is_file():
+        return True, "no capture running"
+    info = read_lock_file(lock)
+    if info is None:
+        return True, f"unreadable/stale lock (will be taken over): {lock}"
+    busy = lock_busy_message(info)
+    if busy:
+        return False, busy
+    parts = [f"launcher={info.launcher_pid or '-'}"]
+    if info.logel_pid:
+        parts.append(f"Logel={info.logel_pid}")
+    return True, f"stale lock (will be taken over): {', '.join(parts)}"
+
+
 class HeadlessCapture:
     def __init__(self, paths: CapturePaths, log=print, poll_sec: float = 0.5):
         self.paths = paths
@@ -171,26 +252,46 @@ class HeadlessCapture:
         self._tail: Optional[AppLogTail] = None
         self._log_text: str = ""
         self._lock_owned = False
+        self._active_session: Optional[Session] = None
 
     # ------------------------------------------------------------- 锁
+    def _write_lock(self, *, logel_pid: Optional[int] = None) -> None:
+        info = LockInfo(
+            launcher_pid=os.getpid(),
+            logel_pid=int(logel_pid) if logel_pid else 0,
+            started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        # 回写 logel_pid 时保留首次 started_at
+        if logel_pid and self.paths.lock_file.is_file():
+            prev = read_lock_file(self.paths.lock_file)
+            if prev and prev.started_at:
+                info.started_at = prev.started_at
+            if prev and prev.launcher_pid:
+                info.launcher_pid = prev.launcher_pid
+        self.paths.lock_file.write_text(
+            json.dumps(info.to_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def acquire_lock(self) -> None:
         lock = self.paths.lock_file
         if lock.is_file():
-            try:
-                data = json.loads(lock.read_text(encoding="utf-8-sig"))
-                pid = int(data.get("pid", 0))
-            except (OSError, ValueError):
-                pid = 0
-            if pid and pid_alive(pid):
-                raise CaptureError(
-                    f"Capture already running (pid={pid}); run `lcapt stop` or wait for it"
-                )
+            info = read_lock_file(lock)
+            if info is not None:
+                busy = lock_busy_message(info)
+                if busy:
+                    raise CaptureError(busy)
+                # 旧锁无 logel_pid：launcher 已死时再看隐藏窗，避免误接管仍占口的 Logel
+                if not info.logel_pid and win32.IS_WINDOWS:
+                    if win32.enum_windows(class_name=self.paths.class_name):
+                        raise CaptureError(
+                            f"Logel window with class {self.paths.class_name} still present "
+                            "(stale lock without logel_pid). Run `lcapt stop` or close it, "
+                            "then retry"
+                        )
             lock.unlink(missing_ok=True)
         self.paths.profile_dir.mkdir(parents=True, exist_ok=True)
-        lock.write_text(
-            json.dumps({"pid": os.getpid(), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}),
-            encoding="utf-8",
-        )
+        self._write_lock()
         self._lock_owned = True
 
     def release_lock(self) -> None:
@@ -211,6 +312,11 @@ class HeadlessCapture:
             [str(self.paths.exe), "-w", "hide", "-n", self.paths.class_name],
             cwd=str(self.paths.bin_dir),
         )
+        if self._lock_owned and self.proc is not None:
+            try:
+                self._write_lock(logel_pid=self.proc.pid)
+            except OSError:
+                pass
 
     def _drain_log(self) -> str:
         if self._tail is None:
@@ -241,6 +347,7 @@ class HeadlessCapture:
                 if session is None:
                     session = find_new_session(self.paths.out_dir, self._started_at, timeout_sec=5)
                 if session is not None:
+                    self._active_session = session
                     self._log(
                         f"[capture] connected {conn['diag_name'] or 'DIAG'} port={conn['diag_port']}"
                         f", session {session.name}"
@@ -288,6 +395,7 @@ class HeadlessCapture:
                 return False, None
             now = time.time()
             chunk = self._drain_log()
+            self._retarget_session_from_log(chunk)
             if port:
                 lost_since = update_diag_lost_since(chunk, port, lost_since, now)
                 if lost_since is not None and (now - lost_since) >= lost_debounce_sec:
@@ -302,7 +410,10 @@ class HeadlessCapture:
             size = self._session_size()
             if progress_every and elapsed - last_report >= progress_every:
                 last_report = elapsed
-                self._log(f"[capture] {int(elapsed)}s captured, .logel {size/1024:.0f} KB")
+                name = self._active_session.name if self._active_session else "?"
+                self._log(
+                    f"[capture] {int(elapsed)}s captured, .logel {size/1024:.0f} KB ({name})"
+                )
             if max_bytes and size >= max_bytes:
                 self._log(f"[capture] reached --max-bytes ({max_bytes}), finishing early")
                 return True, None
@@ -315,9 +426,23 @@ class HeadlessCapture:
                 sleep_for = min(sleep_for, max(0.05, lost_debounce_sec - (now - lost_since)))
             time.sleep(sleep_for)
 
+    def _retarget_session_from_log(self, chunk: str) -> None:
+        """Logel 重连会新建会话目录；跟随 SetLogelFilePath，避免进度一直盯着旧的空目录。"""
+        new_dir = latest_set_logel_session(chunk)
+        if new_dir is None:
+            return
+        if self._active_session is not None and self._active_session.dir.resolve() == new_dir.resolve():
+            return
+        if not new_dir.is_dir():
+            return
+        sess = Session(new_dir)
+        self._active_session = sess
+        self._log(f"[capture] session retargeted -> {sess.name}")
+
     def _session(self) -> Optional[Session]:
-        sess = find_new_session(self.paths.out_dir, self._started_at, timeout_sec=0.1)
-        return sess
+        if self._active_session is not None:
+            return self._active_session
+        return find_new_session(self.paths.out_dir, self._started_at, timeout_sec=0.1)
 
     def _session_size(self) -> int:
         sess = self._session()
@@ -453,6 +578,8 @@ class HeadlessCapture:
         finally:
             self.release_lock()
 
+        if self._active_session is not None:
+            session = self._active_session
         assert session is not None
         elapsed = time.time() - started
         size = session.size_bytes
@@ -507,19 +634,21 @@ def stop_running(profile_dir: Path, class_name: str = "LogelCapture") -> Tuple[b
         return False, f"Logel window with class {class_name} not found (capture may not be running)"
     win32.post_close(win.hwnd)
     lock = profile_dir / ".lcapt.lock"
-    pid = 0
-    if lock.is_file():
-        try:
-            pid = int(json.loads(lock.read_text(encoding="utf-8-sig")).get("pid", 0))
-        except (OSError, ValueError):
-            pid = 0
+    info = read_lock_file(lock)
+    launcher = info.launcher_pid if info else 0
+    logel = info.logel_pid if info else 0
     deadline = time.time() + 120
     while time.time() < deadline:
-        if pid and not pid_alive(pid):
+        launcher_gone = not launcher or not pid_alive(launcher)
+        logel_gone = not logel or not pid_alive(logel)
+        window_gone = not win32.enum_windows(class_name=class_name)
+        # launcher+Logel 都退出，或窗口已消失，才清锁（避免 launcher 先死后误清）
+        if window_gone or (launcher_gone and logel_gone):
             lock.unlink(missing_ok=True)
-            return True, f"Stopped (launcher pid={pid} exited)"
-        if win and not win32.enum_windows(class_name=class_name):
-            lock.unlink(missing_ok=True)
-            return True, "Stopped (window is gone)"
+            if window_gone:
+                return True, "Stopped (window is gone)"
+            if logel:
+                return True, f"Stopped (launcher pid={launcher}, Logel pid={logel} exited)"
+            return True, f"Stopped (launcher pid={launcher} exited)"
         time.sleep(0.5)
     return False, "WM_CLOSE sent but the window is still there after 120s; check manually"

@@ -63,6 +63,14 @@ lcapt capture -d 0 --logel "<Logel>"   # 一直抓到 Ctrl+C，或另开终端 l
 lcapt stop                             # 发 WM_CLOSE 收尾（不会 kill）
 ```
 
+烧写后自动抓（常驻等 DIAG，口出现就开抓；掉线停干净再等下一轮）：
+
+```powershell
+lcapt watch --logel "<Logel>"          # 默认每轮抓到掉线；Ctrl+C 结束 watch
+# 另开终端烧写：dloader flash ...
+# 开机枚举出 SPRD DIAG 后会自动开始新一轮 capture
+```
+
 ## 子命令
 
 | 命令 | 说明 |
@@ -70,6 +78,7 @@ lcapt stop                             # 发 WM_CLOSE 收尾（不会 kill）
 | `doctor` | 环境自检（含其它 Logel 软检查）；硬性检查不过返回 2 |
 | `provision [--link] [--force] [--max-size-mb N]` | 建/刷新 profile。`--link` 用硬链接镜像（配置类文件仍复制） |
 | `capture [-d SEC] [--export] [--no-playback] [--ue-base T] [--min-bytes N] [--max-bytes N]` | 抓取。`-d 0` / 负数 = 抓到 Ctrl+C/`stop`；`--max-bytes` 达上限提前收尾 |
+| `watch [-d SEC] [--settle SEC] [--poll SEC] [--once]` | 等到 **SPRD DIAG** 出现后自动 `capture`；掉线释放后再等。适合烧写后开机抓 log |
 | `stop` | 按窗口类名找隐藏窗口发 `WM_CLOSE` |
 | `list [--limit N]` | 会话列表（大小 / 是否完整收尾 / 是否有解码缓存） |
 | `export [SESSION] [-o FILE] [--ue-base T] [--no-playback]` | 调 logel2txt 导出；省略 SESSION 取最新 |

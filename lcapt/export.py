@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+_COM_IN_NAME_RE = re.compile(r"\((COM\d+)\)\s*$", re.IGNORECASE)
+_SPRD_DIAG_RE = re.compile(r"SPRD\s+DIAG\s*\(\s*COM\d+\s*\)", re.IGNORECASE)
+
 _LINES_RE = re.compile(r"lines:\s*(\d+)")
 _PATH_RE = re.compile(r"output:\s*(.+)")
 
@@ -322,3 +325,81 @@ def list_com_ports() -> List[str]:
     except OSError:
         return []
     return sorted(set(ports), key=lambda s: int("".join(filter(str.isdigit, s)) or 0))
+
+
+def list_com_devices() -> Dict[str, str]:
+    """COM 口 -> 友好名（如 ``SPRD DIAG (COM31)``）。Windows 下用 PnP；失败则退回裸 COM 名。"""
+    if os.name != "nt":
+        return {}
+    named = _list_com_devices_pnp()
+    if named:
+        return named
+    return {p: p for p in list_com_ports()}
+
+
+def _list_com_devices_pnp() -> Dict[str, str]:
+    """Get-CimInstance Win32_PnPEntity，解析 ``Name (COMx)``。"""
+    try:
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8; "
+                "Get-CimInstance Win32_PnPEntity | "
+                "Where-Object { $_.Name -match 'COM\\d+' } | "
+                "ForEach-Object { $_.Name }",
+            ],
+            capture_output=True,
+            timeout=45,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    raw = proc.stdout or b""
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        text = (proc.stderr or b"").decode("utf-8", errors="replace")
+        # 有的机器 stdout 空时仍可能因编码问题落在 bytes；再试 gbk
+        if not text.strip():
+            text = raw.decode("gbk", errors="replace")
+    devices: Dict[str, str] = {}
+    for line in text.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        m = _COM_IN_NAME_RE.search(name)
+        if not m:
+            continue
+        devices[m.group(1).upper()] = name
+    return devices
+
+
+def find_sprd_diag_ports(devices: Optional[Dict[str, str]] = None) -> List[str]:
+    """当前像主 DIAG 的口（``SPRD DIAG (COMx)``，排除 SENSOR/AGDSP）。"""
+    devices = devices if devices is not None else list_com_devices()
+    found: List[str] = []
+    for com, name in devices.items():
+        upper = name.upper()
+        if "SENSOR" in upper or "AGDSP" in upper:
+            continue
+        if _SPRD_DIAG_RE.search(name):
+            found.append(com.upper() if com.upper().startswith("COM") else com)
+    return sorted(set(found), key=lambda s: int("".join(filter(str.isdigit, s)) or 0))
+
+
+def wait_for_sprd_diag(
+    *,
+    poll_sec: float = 1.0,
+    log=None,
+) -> List[str]:
+    """阻塞直到出现至少一个 SPRD DIAG 口；返回 COM 名列表。"""
+    last_note = 0.0
+    while True:
+        ports = find_sprd_diag_ports()
+        if ports:
+            return ports
+        now = time.time()
+        if log and (now - last_note) >= max(2.0, poll_sec):
+            log("[watch] waiting for SPRD DIAG ...")
+            last_note = now
+        time.sleep(max(0.2, poll_sec))

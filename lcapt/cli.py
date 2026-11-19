@@ -15,11 +15,19 @@ from .capture import (
     CaptureError,
     CapturePaths,
     HeadlessCapture,
+    describe_lock,
     other_logel_pids,
     other_logel_warning,
     stop_running,
 )
-from .export import ExportError, export_session, find_logel2txt, list_com_ports
+from .export import (
+    ExportError,
+    export_session,
+    find_logel2txt,
+    find_sprd_diag_ports,
+    list_com_ports,
+    wait_for_sprd_diag,
+)
 from .logel import LogelLayoutError, find_install, list_sessions, read_ini, ini_get
 from .profile import provision
 
@@ -139,28 +147,33 @@ def _playback_exe(args, profile_dir: Path) -> Path:
         return profile_dir / "Bin" / "Logel.exe"
 
 
-def cmd_capture(args, log: Logger) -> int:
+def _prepare_profile(args, log: Logger):
+    """解析路径、找 Logel、按需 provision；返回 (profile_dir, out_dir, paths)。"""
     profile_dir, out_dir = _paths(args)
-    try:
-        install = find_install(args.logel)
-    except LogelLayoutError as exc:
-        if args.no_provision:
-            print(f"[lcapt] {exc}", file=sys.stderr)
-            return EXIT_PREFLIGHT
-        print(f"[lcapt] {exc}", file=sys.stderr)
-        return EXIT_PREFLIGHT
-
+    install = find_install(args.logel)
     need_provision = not (profile_dir / "Bin" / "Logel.exe").is_file()
-    if need_provision and args.no_provision:
-        print(
-            f"[lcapt] profile not found: {profile_dir} (add --provision or run `lcapt provision` first)",
-            file=sys.stderr,
+    if need_provision and getattr(args, "no_provision", False):
+        raise CaptureError(
+            f"profile not found: {profile_dir} (add --provision or run `lcapt provision` first)"
         )
-        return EXIT_PREFLIGHT
-    if not args.no_provision:
-        provision(install, profile_dir, out_dir, link=args.link, log=log)
+    if not getattr(args, "no_provision", False):
+        provision(
+            install,
+            profile_dir,
+            out_dir,
+            link=bool(getattr(args, "link", False)),
+            log=log,
+        )
+    paths = CapturePaths(
+        profile_dir=profile_dir,
+        out_dir=out_dir,
+        class_name=getattr(args, "class_name", DEFAULT_CLASS),
+    )
+    return profile_dir, out_dir, paths
 
-    paths = CapturePaths(profile_dir=profile_dir, out_dir=out_dir, class_name=args.class_name)
+
+def _run_one_capture(args, log: Logger, paths: CapturePaths, profile_dir: Path) -> int:
+    """跑一轮 capture；成功 0，失败为 EXIT_*。"""
     warn = other_logel_warning()
     if warn:
         log(f"[capture][WARN] {warn}")
@@ -175,10 +188,8 @@ def cmd_capture(args, log: Logger) -> int:
         )
     except CaptureError as exc:
         print(f"[lcapt] capture failed: {exc}", file=sys.stderr)
-        # Only real stop failures (window missing / close timed out), not "stopped with WM_CLOSE" reasons
         msg = str(exc)
         return EXIT_STOP if ("after WM_CLOSE" in msg or "cannot stop safely" in msg) else EXIT_CAPTURE
-
     except OSError as exc:
         print(f"[lcapt] capture failed: {exc}", file=sys.stderr)
         return EXIT_CAPTURE
@@ -186,7 +197,7 @@ def cmd_capture(args, log: Logger) -> int:
     data = result.to_dict()
     data["elapsed_sec"] = round(time.time() - started, 1)
 
-    if args.export:
+    if getattr(args, "export", False):
         try:
             exp = export_session(
                 result.session.dir,
@@ -207,6 +218,65 @@ def cmd_capture(args, log: Logger) -> int:
         human.append(f"text   : {data['export']['output']} ({data['export']['lines']} lines)")
     _emit(data, args.json, human)
     return EXIT_OK
+
+
+def cmd_capture(args, log: Logger) -> int:
+    try:
+        profile_dir, _out_dir, paths = _prepare_profile(args, log)
+    except LogelLayoutError as exc:
+        print(f"[lcapt] {exc}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    except CaptureError as exc:
+        print(f"[lcapt] {exc}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    return _run_one_capture(args, log, paths, profile_dir)
+
+
+def cmd_watch(args, log: Logger) -> int:
+    """常驻：等到 SPRD DIAG 出现 → settle → 抓一轮 →（掉线或结束后）再等。"""
+    try:
+        profile_dir, _out_dir, paths = _prepare_profile(args, log)
+    except LogelLayoutError as exc:
+        print(f"[lcapt] {exc}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    except CaptureError as exc:
+        print(f"[lcapt] {exc}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+
+    poll = max(0.2, float(args.poll))
+    settle = max(0.0, float(args.settle))
+    round_no = 0
+    last_rc = EXIT_OK
+    log(
+        "[watch] armed: will start capture when SPRD DIAG appears "
+        f"(poll={poll}s, settle={settle}s, duration={args.duration}, once={bool(args.once)})"
+    )
+    try:
+        while True:
+            ports = find_sprd_diag_ports()
+            if not ports:
+                ports = wait_for_sprd_diag(poll_sec=poll, log=log)
+            log(f"[watch] SPRD DIAG present: {', '.join(ports)}")
+            if settle:
+                log(f"[watch] settling {settle:.1f}s for USB stack")
+                time.sleep(settle)
+                ports = find_sprd_diag_ports()
+                if not ports:
+                    log("[watch] DIAG disappeared during settle; waiting again")
+                    continue
+            round_no += 1
+            log(f"[watch] capture round {round_no}")
+            last_rc = _run_one_capture(args, log, paths, profile_dir)
+            if args.once:
+                return last_rc
+            # 口还在则稍等再开下一轮；口没了则回到等待（烧写场景）
+            if find_sprd_diag_ports():
+                time.sleep(poll)
+            else:
+                log("[watch] DIAG gone after capture; waiting for next appearance")
+    except KeyboardInterrupt:
+        log("[watch] interrupted")
+        return 130
 
 
 def _human_capture(result) -> List[str]:
@@ -348,11 +418,8 @@ def cmd_doctor(args, log: Logger) -> int:
     )
 
     lock = profile_dir / ".lcapt.lock"
-    add(
-        "concurrent capture",
-        not lock.is_file(),
-        "no capture running" if not lock.is_file() else f"lock present: {lock}",
-    )
+    lock_ok, lock_detail = describe_lock(lock)
+    add("concurrent capture", lock_ok, lock_detail)
 
     def _mark(c: Dict[str, object]) -> str:
         if c["ok"]:
@@ -475,6 +542,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--playback", dest="playback", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--logel2txt", default=None)
     p.set_defaults(func=cmd_capture, playback=True)
+
+    p = new(
+        "watch",
+        "Wait for SPRD DIAG, auto-start capture, repeat after disconnect (flash-friendly)",
+    )
+    p.add_argument(
+        "-d",
+        "--duration",
+        type=float,
+        default=0.0,
+        help="Per-round capture seconds; 0 = until disconnect / Ctrl+C / lcapt stop",
+    )
+    p.add_argument("--min-bytes", type=int, default=1024)
+    p.add_argument("--max-bytes", type=int, default=None)
+    p.add_argument("--stop-timeout", type=float, default=120.0)
+    p.add_argument("--class-name", default=DEFAULT_CLASS)
+    p.add_argument("--no-provision", action="store_true")
+    p.add_argument("--link", action="store_true")
+    p.add_argument("--export", action="store_true", help="Export txt after each successful round")
+    p.add_argument("--ue-base", default=None)
+    p.add_argument("--no-playback", dest="playback", action="store_false")
+    p.add_argument("--playback", dest="playback", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--logel2txt", default=None)
+    p.add_argument(
+        "--poll",
+        type=float,
+        default=1.0,
+        help="Seconds between DIAG port polls while waiting",
+    )
+    p.add_argument(
+        "--settle",
+        type=float,
+        default=3.0,
+        help="Seconds to wait after DIAG appears before starting capture",
+    )
+    p.add_argument(
+        "--once",
+        action="store_true",
+        help="Capture only one round after DIAG appears, then exit",
+    )
+    p.set_defaults(func=cmd_watch, playback=True)
 
     p = new("stop", "Stop the running capture (sends WM_CLOSE)")
     p.add_argument("--class-name", default=DEFAULT_CLASS)

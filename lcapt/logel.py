@@ -27,6 +27,7 @@ _DEVICE_CHANGE_RE = re.compile(
     r"RecvDeviceChange:\s*\[(OUT|IN\s*)\]\s*port\s+(\d+)",
     re.IGNORECASE,
 )
+_SET_LOGEL_PATH_RE = re.compile(r"SetLogelFilePath\s*:\s*\[(.+?\.logel)\]", re.IGNORECASE)
 
 
 class LogelLayoutError(RuntimeError):
@@ -274,6 +275,17 @@ def analyze_connect_log(text: str) -> Dict[str, object]:
         "no_log_port": bool(_NO_LOG_RE.search(text)),
         "tool_version": version.group(1) if version else None,
     }
+
+
+def latest_set_logel_session(chunk: str) -> Optional[Path]:
+    """从日志片段里取最后一次 ``SetLogelFilePath`` 对应的会话目录（`*_armlog`）。"""
+    path: Optional[Path] = None
+    for m in _SET_LOGEL_PATH_RE.finditer(chunk or ""):
+        path = Path(m.group(1).strip())
+    if path is None:
+        return None
+    # .../<ts>_armlog/<ts>.logel → parent 即会话目录
+    return path.parent if path.suffix.lower() == ".logel" else path
 
 
 def update_diag_lost_since(

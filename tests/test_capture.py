@@ -12,9 +12,12 @@ from lcapt.capture import (
     CaptureError,
     CapturePaths,
     HeadlessCapture,
+    describe_lock,
+    lock_busy_message,
     other_logel_pids,
     other_logel_warning,
     port_busy_hint,
+    read_lock_file,
 )
 
 
@@ -38,10 +41,11 @@ def test_refuses_when_other_capture_alive(tmp_path: Path):
     assert paths.lock_file.is_file()
 
 
-def test_takes_over_stale_lock_and_releases_own(tmp_path: Path):
+def test_takes_over_stale_lock_and_releases_own(tmp_path: Path, monkeypatch):
     paths = _paths(tmp_path)
     paths.profile_dir.mkdir(parents=True, exist_ok=True)
     paths.lock_file.write_text(json.dumps({"pid": 999999}), encoding="utf-8")
+    monkeypatch.setattr("lcapt.capture.win32.enum_windows", lambda **_: [])
 
     cap = HeadlessCapture(paths, log=lambda _: None)
     cap.acquire_lock()
@@ -50,15 +54,91 @@ def test_takes_over_stale_lock_and_releases_own(tmp_path: Path):
     assert not paths.lock_file.exists()
 
 
-def test_tolerates_bom_in_lock_file(tmp_path: Path):
+def test_tolerates_bom_in_lock_file(tmp_path: Path, monkeypatch):
     paths = _paths(tmp_path)
     paths.profile_dir.mkdir(parents=True, exist_ok=True)
     paths.lock_file.write_text(json.dumps({"pid": 999999}), encoding="utf-8-sig")
+    monkeypatch.setattr("lcapt.capture.win32.enum_windows", lambda **_: [])
 
     cap = HeadlessCapture(paths, log=lambda _: None)
     cap.acquire_lock()  # 有 BOM 也应按陈旧锁处理，而不是崩掉
     assert json.loads(paths.lock_file.read_text(encoding="utf-8"))["pid"] == os.getpid()
     cap.release_lock()
+
+
+def test_refuses_when_launcher_dead_but_logel_alive(tmp_path: Path, monkeypatch):
+    paths = _paths(tmp_path)
+    paths.profile_dir.mkdir(parents=True, exist_ok=True)
+    paths.lock_file.write_text(
+        json.dumps({"pid": 111111, "logel_pid": 222222}),
+        encoding="utf-8",
+    )
+
+    def fake_alive(pid: int) -> bool:
+        return int(pid) == 222222
+
+    monkeypatch.setattr("lcapt.capture.pid_alive", fake_alive)
+    cap = HeadlessCapture(paths, log=lambda _: None)
+    with pytest.raises(CaptureError, match="Orphan Logel"):
+        cap.acquire_lock()
+    assert paths.lock_file.is_file()
+
+
+def test_takes_over_when_launcher_and_logel_dead(tmp_path: Path, monkeypatch):
+    paths = _paths(tmp_path)
+    paths.profile_dir.mkdir(parents=True, exist_ok=True)
+    paths.lock_file.write_text(
+        json.dumps({"pid": 111111, "logel_pid": 222222, "started_at": "old"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("lcapt.capture.pid_alive", lambda _pid: False)
+    monkeypatch.setattr("lcapt.capture.win32.enum_windows", lambda **_: [])
+
+    cap = HeadlessCapture(paths, log=lambda _: None)
+    cap.acquire_lock()
+    data = json.loads(paths.lock_file.read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    assert "logel_pid" not in data  # 尚未 start，还没回写
+    cap._write_lock(logel_pid=333)
+    data = json.loads(paths.lock_file.read_text(encoding="utf-8"))
+    assert data["logel_pid"] == 333
+    assert data["pid"] == os.getpid()
+    cap.release_lock()
+
+
+def test_describe_lock_stale_vs_busy(tmp_path: Path, monkeypatch):
+    lock = tmp_path / ".lcapt.lock"
+    assert describe_lock(lock) == (True, "no capture running")
+
+    lock.write_text(json.dumps({"pid": 999999, "logel_pid": 888888}), encoding="utf-8")
+    monkeypatch.setattr("lcapt.capture.pid_alive", lambda _pid: False)
+    ok, detail = describe_lock(lock)
+    assert ok is True
+    assert "stale" in detail
+
+    monkeypatch.setattr("lcapt.capture.pid_alive", lambda pid: int(pid) == 888888)
+    ok, detail = describe_lock(lock)
+    assert ok is False
+    assert "Orphan Logel" in detail
+
+
+def test_read_lock_and_busy_message_roundtrip(tmp_path: Path, monkeypatch):
+    lock = tmp_path / ".lcapt.lock"
+    lock.write_text(
+        json.dumps({"pid": 1, "logel_pid": 2, "started_at": "t"}),
+        encoding="utf-8-sig",
+    )
+    info = read_lock_file(lock)
+    assert info is not None
+    assert info.launcher_pid == 1 and info.logel_pid == 2
+    monkeypatch.setattr("lcapt.capture.pid_alive", lambda _pid: False)
+    assert lock_busy_message(info) is None
+    monkeypatch.setattr(
+        "lcapt.capture.pid_alive",
+        lambda pid: int(pid) in (1, 2),
+    )
+    msg = lock_busy_message(info)
+    assert msg is not None and "launcher pid=1" in msg and "Logel pid=2" in msg
 
 
 def test_port_busy_hint_only_when_port_open_failed():

@@ -17,6 +17,16 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 - **抓取中 DIAG 掉线自动停**：`Application.log` 出现对应口的 `RecvDeviceChange: [OUT]`
   且约 3 秒内无 `[IN ]` 重连时，发 `WM_CLOSE` 收尾释放端口，并以抓取失败退出
   （exit 3）；短抖动 OUT→IN 不误停。口恢复后需重新 `capture`（新会话）。
+- **`lcapt watch`**：常驻等待 **SPRD DIAG** 出现 → settle → 自动开抓；掉线停抓释放后
+  继续等下一轮（烧写后开机无需再手动开抓）。`--once` 只跑一轮；默认 `-d 0` 抓到掉线。
+
+### 修复
+
+- **进度 `.logel` 显示 0 但实际有数据**：监控不再每次按 mtime 抢「最新空会话」；锁定当前会话，
+  并跟随 `SetLogelFilePath` 重定向（Logel 短断重连会新建目录）。
+- **并发锁只记 launcher PID**：`start` 后回写 `logel_pid`；launcher 已死但 Logel 仍存活时
+  不再误判陈旧锁并接管（避免双开抢 DIAG）。旧锁无 `logel_pid` 时额外看隐藏窗类名。
+  `doctor` 的 concurrent capture 与此对齐：陈旧锁显示可接管，不再仅因文件存在就 ERR。
 
 ### 变更
 
@@ -24,6 +34,7 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 - `serial ports` 改为软检查（未插机也可 doctor 通过）。
 - `--out` 帮助文案与默认一致：`<Logel>\..\Logel_History`，并注明须纯 ASCII。
 - `abort()` 失败兜底改为先 `WM_CLOSE` 再短等，最后才 `kill`。
+- `lcapt stop` 清锁改为等窗口消失，或 launcher 与 Logel **均**退出（避免 launcher 先死误清锁）。
 
 ## [1.0.0] - 2026-11-19
 

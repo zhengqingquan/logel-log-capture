@@ -12,6 +12,7 @@ from lcapt.logel import (
     find_new_session,
     ini_get,
     ini_patch,
+    latest_set_logel_session,
     list_sessions,
     update_diag_lost_since,
 )
@@ -95,6 +96,18 @@ def test_update_diag_lost_since_same_chunk_out_in():
         "CMainFrame::RecvDeviceChange: [IN ] port 31, SPRD DIAG\n"
     )
     assert update_diag_lost_since(chunk, 31, None, now=10.0) is None
+
+
+def test_latest_set_logel_session_parses_path():
+    chunk = (
+        "SetLogelFilePath : [D:\\Unisoc_Tool\\Logel_History\\2026_11_19_12_19_33_982_armlog\\"
+        "2026_11_19_12_19_33_982.logel]\n"
+        "SetLogelFilePath : [D:\\Unisoc_Tool\\Logel_History\\2026_11_19_12_19_57_495_armlog\\"
+        "2026_11_19_12_19_57_495.logel]\n"
+    )
+    got = latest_set_logel_session(chunk)
+    assert got is not None
+    assert got.name == "2026_11_19_12_19_57_495_armlog"
 
 
 def _fake_session(root: Path, name: str, *, logel_bytes: int = 1024, stop: bool = True) -> Path:
