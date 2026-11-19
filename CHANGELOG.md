@@ -62,7 +62,7 @@ CLI 版本以 `lcapt version` / `pyproject.toml` / `lcapt.__version__` 为准。
 
 - **禁止 `--out` / `LCAPT_OUT` 使用中文等非 ASCII 路径**：实测指向含中文目录时 DIAG 可能连上但
   会话建失败 / 超时无 `.logel`。应先写到 ASCII 目录（如 `D:\Unisoc_Tool\Logel_History\`），
-  再拷贝到中文工作区。已写入本仓库 `README.md` 与 skill 根 `SKILL.md`。
+  再拷贝到中文工作区。已写入本仓库 `README.md`。
 
 ### 已知限制
 
